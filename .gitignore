@@ -1,0 +1,7 @@
+node_modules
+dist
+public/wasm
+public/models
+android
+.DS_Store
+*.log

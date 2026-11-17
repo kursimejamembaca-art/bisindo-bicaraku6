@@ -1,0 +1,82 @@
+workflows:
+  bisindo-android-apk:
+    name: BISINDO Android APK
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      node: 20
+      java: 17
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+    scripts:
+      - name: Pasang dependensi (juga menyalin wasm dan mengunduh model MediaPipe)
+        script: |
+          set -e
+          node -v
+          java -version
+          npm install --no-audit --no-fund
+      - name: Build web
+        script: |
+          set -e
+          npm run build
+          test -f dist/models/hand_landmarker.task || { echo "GALAT: model hand_landmarker.task tidak ada di dist/models"; exit 1; }
+          test -d dist/wasm || { echo "GALAT: folder wasm tidak ada di dist/wasm"; exit 1; }
+          ls -la dist
+      - name: Sesuaikan versi Java plugin Capacitor (Java 21 jadi 17)
+        script: |
+          set -e
+          # Plugin text-to-speech terbaru meminta Java 21, sedangkan Capacitor 6 dan Gradle 8.2 memakai Java 17.
+          # Tanpa ini build gagal dengan "error: invalid source release: 21".
+          for f in node_modules/@capacitor-community/*/android/build.gradle node_modules/@capacitor-community/*/android/build.gradle.kts; do
+            [ -f "$f" ] || continue
+            perl -pi -e 's/VERSION_21/VERSION_17/g; s/JavaVersion\.toVersion\((["\x27]?)21\1\)/JavaVersion.toVersion($1\x31\x37$1)/g' "$f"
+            echo "== $f"
+            grep -n -i 'VERSION_\|jvmTarget\|toVersion' "$f" || true
+          done
+      - name: Siapkan platform Android (dibuat sekali)
+        script: |
+          set -e
+          if [ ! -d android ]; then npx cap add android; fi
+          npx cap sync android
+      - name: Arahkan Gradle ke Android SDK
+        script: |
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          if [ -n "$SDK" ]; then
+            echo "sdk.dir=$SDK" > android/local.properties
+            cat android/local.properties
+          else
+            echo "ANDROID_SDK_ROOT tidak diset, memakai bawaan Gradle"
+          fi
+      - name: Izin kamera di AndroidManifest
+        script: |
+          set -e
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if ! grep -q 'android.permission.CAMERA' "$MANIFEST"; then
+            perl -0pi -e 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <application#' "$MANIFEST"
+          fi
+          grep -n 'CAMERA' "$MANIFEST"
+      - name: Terima lisensi Android SDK
+        script: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMGR="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMGR" ]; then
+            yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+            echo "lisensi SDK diproses"
+          else
+            echo "sdkmanager tidak ditemukan, dilewati"
+          fi
+      - name: Build APK debug
+        script: |
+          set -e
+          cd android
+          chmod +x gradlew
+          # Tanpa --stacktrace agar pesan "What went wrong" tidak tertimbun ribuan baris
+          ./gradlew assembleDebug --no-daemon --console=plain
+    artifacts:
+      - android/app/build/outputs/apk/debug/*.apk
